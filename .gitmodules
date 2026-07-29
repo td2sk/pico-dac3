@@ -1,0 +1,4 @@
+[submodule "vendor/usb-device"]
+	path = vendor/usb-device
+	url = https://github.com/td2sk/usb-device.git
+	branch = pico-dac3-0.3.2
