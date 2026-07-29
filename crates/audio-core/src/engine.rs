@@ -114,7 +114,9 @@ impl AudioEngine {
         let measured = (self.fifo.len() as i64) << 16;
         self.filtered_fill_q16 += (measured - self.filtered_fill_q16) / 100;
         let error = self.filtered_fill_q16 - ((self.target_frames as i64) << 16);
-        let correction = (error >> 8).clamp(-(200_i64 << 16), 200_i64 << 16);
+        let capacity = self.fifo.capacity() as i64;
+        let correction = (self.nominal_rate_q16 * error / (capacity << 16) / 100)
+            .clamp(-(200_i64 << 16), 200_i64 << 16);
         FeedbackQ16((self.nominal_rate_q16 - correction).max(0) as u32)
     }
 
@@ -242,6 +244,27 @@ mod tests {
         engine.set_actual_output_rate(47_999);
         assert_eq!(engine.nominal_rate_q16, (47_999_i64 << 16) / 1_000);
         assert_eq!(engine.feedback().raw(), ((47_999_i64 << 16) / 1_000) as u32);
+    }
+
+    #[test]
+    fn feedback_matches_legacy_occupancy_servo_gain() {
+        let mut engine = AudioEngine::new();
+        engine.start(
+            StreamConfig {
+                rate: SampleRate::Hz48000,
+                format: SampleFormat::Pcm16,
+            },
+            48_000,
+        );
+        let packet = [0_u8; 4].repeat(480);
+        engine.push_usb_packet(&packet).unwrap();
+        assert_eq!(engine.state(), EngineState::Running);
+
+        // EMA alpha=0.01 moves 96 frames of error to 0.96 frame. The legacy
+        // correction is nominal * (filtered_error / capacity) * 0.01.
+        let expected_correction =
+            ((48_i64 << 16) * ((96_i64 << 16) / 100) / (768_i64 << 16) / 100) as u32;
+        assert_eq!(engine.feedback().raw(), (48 << 16) - expected_correction);
     }
 
     #[test]

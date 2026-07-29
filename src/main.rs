@@ -9,6 +9,7 @@
 #![no_std]
 #![no_main]
 
+mod clocks;
 mod i2s;
 
 use audio_core::{AudioEngine, EngineState, StreamConfig};
@@ -59,7 +60,6 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 #[cfg(rp2350)]
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
-const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 const VENDOR_ID: u16 = 0xcafe;
 const PRODUCT_ID: u16 = 0xbabe;
 
@@ -100,8 +100,7 @@ fn main() -> ! {
     info!("pico-dac3 start");
     let mut pac = hal::pac::Peripherals::take().unwrap();
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
-    let clocks = hal::clocks::init_clocks_and_plls(
-        XTAL_FREQ_HZ,
+    let clocks = clocks::init(
         pac.XOSC,
         pac.CLOCKS,
         pac.PLL_SYS,
@@ -242,9 +241,9 @@ fn main() -> ! {
 
         i2s::fill_dma_buffer(&mut audio, config.format, buffer_a);
         i2s::fill_dma_buffer(&mut audio, config.format, buffer_b);
-        let sm = sm.start();
         let transfer = double_buffer::Config::new((ch0, ch1), buffer_a, tx).start();
         let mut transfer = transfer.read_next(buffer_b);
+        let sm = sm.start();
         let mut restart_stream = None;
 
         loop {

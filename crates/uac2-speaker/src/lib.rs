@@ -177,6 +177,7 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
             self.feedback_pending = false;
             Some(Uac2Event::StreamStopped)
         } else {
+            self.feedback = FeedbackQ16::from_rate_hz(self.rate.hz());
             self.feedback_pending = true;
             Some(Uac2Event::StreamStarted {
                 rate: self.rate,
@@ -263,6 +264,7 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
             let hz = u32::from_le_bytes(xfer.data().try_into().unwrap());
             if let Some(rate) = SampleRate::from_hz(hz) {
                 self.rate = rate;
+                self.feedback = FeedbackQ16::from_rate_hz(rate.hz());
                 self.event = Some(Uac2Event::ControlChanged(ControlChange::SampleRate(rate)));
                 let _ = xfer.accept();
             } else {
