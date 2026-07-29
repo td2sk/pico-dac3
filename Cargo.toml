@@ -3,7 +3,7 @@
 edition = "2024"
 name = "pico-dac3"
 version = "0.1.0"
-license = "MIT or Apache-2.0"
+license = "MIT"
 
 [workspace]
 resolver = "2"
@@ -12,7 +12,7 @@ members = ["crates/audio-core", "crates/uac2-speaker"]
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [workspace.dependencies]
 audio-core = { path = "crates/audio-core" }

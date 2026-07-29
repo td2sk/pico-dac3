@@ -1,8 +1,6 @@
-//! SPDX-License-Identifier: MIT OR Apache-2.0
+//! SPDX-License-Identifier: MIT
 //!
-//! Copyright (c) 2021–2024 The rp-rs Developers
-//! Copyright (c) 2021 rp-rs organization
-//! Copyright (c) 2025 Raspberry Pi Ltd.
+//! Copyright (c) 2026 td2sk
 //!
 //! pico-dac3 USB Audio Class 2.0 firmware.
 
