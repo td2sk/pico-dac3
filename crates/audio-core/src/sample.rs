@@ -83,6 +83,14 @@ impl SampleQ31 {
         self.0 >> 8
     }
 
+    pub const fn to_i2s_word(self, format: SampleFormat) -> u32 {
+        match format {
+            SampleFormat::Pcm16 => (self.0 >> 16) as u32,
+            SampleFormat::Pcm24In32 => (self.0 >> 8) as u32,
+            SampleFormat::Pcm32 => self.0 as u32,
+        }
+    }
+
     pub fn apply_gain(self, gain: GainU31) -> Self {
         let value = (self.0 as i64 * gain.0 as i64) >> 31;
         Self(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
@@ -130,5 +138,21 @@ mod tests {
         let input = SampleQ31::from_pcm32(0x4000_0000);
         assert_eq!(input.apply_gain(GainU31::UNITY), input);
         assert_eq!(input.apply_gain(GainU31::SILENCE), SampleQ31::SILENCE);
+    }
+
+    #[test]
+    fn packs_right_aligned_i2s_words() {
+        assert_eq!(
+            SampleQ31::from_pcm32(0x1234_0000).to_i2s_word(SampleFormat::Pcm16),
+            0x1234
+        );
+        assert_eq!(
+            SampleQ31::from_pcm32(0x1234_5600).to_i2s_word(SampleFormat::Pcm24In32),
+            0x123456
+        );
+        assert_eq!(
+            SampleQ31::from_pcm32(i32::MIN).to_i2s_word(SampleFormat::Pcm16),
+            0xffff_8000
+        );
     }
 }

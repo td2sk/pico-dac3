@@ -23,6 +23,7 @@ const RANGE: u8 = 2;
 const MUTE: u8 = 1;
 const VOLUME: u8 = 2;
 const SAMPLING_FREQUENCY: u8 = 1;
+const CLOCK_VALIDITY: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlChange {
@@ -54,6 +55,7 @@ pub struct Uac2Speaker<'a, B: UsbBus> {
     packet: [u8; AUDIO_MAX_PACKET_SIZE as usize],
     packet_len: usize,
     feedback: FeedbackQ16,
+    feedback_pending: bool,
 }
 
 impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
@@ -95,6 +97,7 @@ impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
             packet: [0; AUDIO_MAX_PACKET_SIZE as usize],
             packet_len: 0,
             feedback: FeedbackQ16::from_rate_hz(48_000),
+            feedback_pending: false,
         }
     }
 
@@ -112,6 +115,10 @@ impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
 
     pub fn set_feedback(&mut self, value: FeedbackQ16) {
         self.feedback = value;
+    }
+
+    pub const fn feedback_requested(&self) -> bool {
+        self.feedback_pending
     }
 
     pub const fn current_format(&self) -> Option<SampleFormat> {
@@ -167,8 +174,10 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
         self.alt = alternative;
         self.packet_len = 0;
         self.event = if alternative == 0 {
+            self.feedback_pending = false;
             Some(Uac2Event::StreamStopped)
         } else {
+            self.feedback_pending = true;
             Some(Uac2Event::StreamStarted {
                 rate: self.rate,
                 format: self.current_format().unwrap(),
@@ -188,8 +197,20 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
     }
 
     fn poll(&mut self) {
-        if self.alt != 0 {
-            let _ = self.feedback_in.write(&self.feedback.to_usb_bytes());
+        if self.alt != 0
+            && self.feedback_pending
+            && self
+                .feedback_in
+                .write(&self.feedback.to_usb_bytes())
+                .is_ok()
+        {
+            self.feedback_pending = false;
+        }
+    }
+
+    fn endpoint_in_complete(&mut self, address: EndpointAddress) {
+        if address == self.feedback_in.address() && self.alt != 0 {
+            self.feedback_pending = true;
         }
     }
 
@@ -201,10 +222,11 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
         let entity = (req.index >> 8) as u8;
         let selector = (req.value >> 8) as u8;
         let channel = req.value as u8;
-        let result = if entity == CLOCK_SOURCE && selector == SAMPLING_FREQUENCY {
-            match req.request {
-                CUR => xfer.accept_with(&self.rate.hz().to_le_bytes()),
-                RANGE => xfer.accept_with(&descriptors::sample_rate_range()),
+        let result = if entity == CLOCK_SOURCE {
+            match (selector, req.request) {
+                (SAMPLING_FREQUENCY, CUR) => xfer.accept_with(&self.rate.hz().to_le_bytes()),
+                (SAMPLING_FREQUENCY, RANGE) => xfer.accept_with(&descriptors::sample_rate_range()),
+                (CLOCK_VALIDITY, CUR) => xfer.accept_with(&[1]),
                 _ => xfer.reject(),
             }
         } else if entity == FEATURE_UNIT {
@@ -378,10 +400,20 @@ impl<B: UsbBus> UsbClass<B> for VendorHid<'_, B> {
     }
 
     fn endpoint_out(&mut self, address: EndpointAddress) {
-        if address == self.output.address() {
-            if let Ok(16) = self.output.read(&mut self.output_report) {
-                self.output_ready = true;
-            }
+        if address == self.output.address()
+            && let Ok(16) = self.output.read(&mut self.output_report)
+        {
+            self.output_ready = true;
         }
+    }
+
+    fn endpoint_in_complete(&mut self, address: EndpointAddress) {
+        if address == self.input.address() {
+            let _ = self.input.write(&[0; 16]);
+        }
+    }
+
+    fn poll(&mut self) {
+        let _ = self.input.write(&[0; 16]);
     }
 }

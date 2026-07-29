@@ -86,6 +86,10 @@ impl AudioEngine {
         self.state = EngineState::Disabled;
     }
 
+    pub fn set_actual_output_rate(&mut self, rate_hz: u32) {
+        self.nominal_rate_q16 = ((rate_hz as i64) << 16) / 1_000;
+    }
+
     pub const fn state(&self) -> EngineState {
         self.state
     }
@@ -103,6 +107,10 @@ impl AudioEngine {
     }
 
     pub fn feedback(&mut self) -> FeedbackQ16 {
+        if self.state != EngineState::Running {
+            self.filtered_fill_q16 = (self.target_frames as i64) << 16;
+            return FeedbackQ16(self.nominal_rate_q16 as u32);
+        }
         let measured = (self.fifo.len() as i64) << 16;
         self.filtered_fill_q16 += (measured - self.filtered_fill_q16) / 100;
         let error = self.filtered_fill_q16 - ((self.target_frames as i64) << 16);
@@ -113,7 +121,7 @@ impl AudioEngine {
     pub fn push_usb_packet(&mut self, packet: &[u8]) -> Result<usize, PacketError> {
         let config = self.config.ok_or(PacketError::NotStreaming)?;
         let stride = config.format.bytes_per_frame();
-        if packet.len() % stride != 0 {
+        if !packet.len().is_multiple_of(stride) {
             return Err(PacketError::Misaligned);
         }
         let count = packet.len() / stride;
@@ -230,6 +238,10 @@ mod tests {
             FeedbackQ16::from_rate_hz(44_100).raw(),
             ((44_100_u64 << 16).div_ceil(1_000)) as u32
         );
+        let mut engine = AudioEngine::new();
+        engine.set_actual_output_rate(47_999);
+        assert_eq!(engine.nominal_rate_q16, (47_999_i64 << 16) / 1_000);
+        assert_eq!(engine.feedback().raw(), ((47_999_i64 << 16) / 1_000) as u32);
     }
 
     #[test]

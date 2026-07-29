@@ -1,0 +1,62 @@
+.program i2s_stereo_16bit
+.side_set 2
+.wrap_target
+  out null, 16        side 0b01
+L16_0:
+  out pins, 1         side 0b00
+  set x, 13           side 0b01
+L16_1:
+  out pins, 1         side 0b00
+  jmp x--, L16_1      side 0b01
+  out pins, 1         side 0b10
+  out null, 16        side 0b11
+R16_0:
+  out pins, 1         side 0b10
+  set x, 13           side 0b11
+R16_1:
+  out pins, 1         side 0b10
+  jmp x--, R16_1      side 0b11
+  out pins, 1         side 0b00
+.wrap
+
+.program i2s_stereo_24bit
+.side_set 2
+.wrap_target
+  out null, 8         side 0b01
+L24_0:
+  out pins, 1         side 0b00
+  set x, 21           side 0b01
+L24_1:
+  out pins, 1         side 0b00
+  jmp x--, L24_1      side 0b01
+  out pins, 1         side 0b10
+  out null, 8         side 0b11
+R24_0:
+  out pins, 1         side 0b10
+  set x, 21           side 0b11
+R24_1:
+  out pins, 1         side 0b10
+  jmp x--, R24_1      side 0b11
+  out pins, 1         side 0b00
+.wrap
+
+.program i2s_stereo_32bit
+.side_set 2
+.wrap_target
+  nop                 side 0b01
+L32_0:
+  out pins, 1         side 0b00
+  set x, 29           side 0b01
+L32_1:
+  out pins, 1         side 0b00
+  jmp x--, L32_1      side 0b01
+  out pins, 1         side 0b10
+  nop                 side 0b11
+R32_0:
+  out pins, 1         side 0b10
+  set x, 29           side 0b11
+R32_1:
+  out pins, 1         side 0b10
+  jmp x--, R32_1      side 0b11
+  out pins, 1         side 0b00
+.wrap
