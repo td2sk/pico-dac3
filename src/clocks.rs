@@ -105,7 +105,9 @@ pub fn init(
         .map_err(InitError::ClockError)?;
     clocks
         .peripheral_clock
-        .configure_clock(&clocks.system_clock, clocks.system_clock.freq())
+        // Pico SDK's set_sys_clock_pll() keeps clk_peri on PLL_USB unless
+        // PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK is enabled.
+        .configure_clock(&pll_usb, pll_usb.get_freq())
         .map_err(InitError::ClockError)?;
 
     Ok(clocks)

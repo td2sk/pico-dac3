@@ -17,7 +17,10 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 audio-core = { path = "crates/audio-core" }
 uac2-speaker = { path = "crates/uac2-speaker" }
-usb-device = "0.3.2"
+usb-device = { version = "0.3.2", features = ["control-buffer-512"] }
+
+[patch.crates-io]
+usb-device = { path = "vendor/usb-device" }
 
 [build-dependencies]
 regex = "1.11.0"
