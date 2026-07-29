@@ -31,7 +31,11 @@ pub struct FeedbackQ16(u32);
 
 impl FeedbackQ16 {
     pub const fn from_rate_hz(rate: u32) -> Self {
-        Self(rate << 16)
+        Self(((rate as u64) << 16).div_ceil(1_000) as u32)
+    }
+
+    pub const fn raw(self) -> u32 {
+        self.0
     }
 
     pub const fn to_usb_bytes(self) -> [u8; 4] {
@@ -59,7 +63,7 @@ impl AudioEngine {
             fifo: AudioFifo::new(),
             controls: Controls::new(),
             target_frames: 384,
-            nominal_rate_q16: 48_000 << 16,
+            nominal_rate_q16: (48_000_i64 << 16) / 1_000,
             filtered_fill_q16: 384 << 16,
             underruns: 0,
             overruns: 0,
@@ -70,7 +74,7 @@ impl AudioEngine {
         let capacity = config.rate.hz() as usize * 16 / 1_000;
         self.target_frames = capacity / 2;
         self.fifo.set_capacity(capacity);
-        self.nominal_rate_q16 = (actual_i2s_rate_hz as i64) << 16;
+        self.nominal_rate_q16 = ((actual_i2s_rate_hz as i64) << 16) / 1_000;
         self.filtered_fill_q16 = (self.target_frames as i64) << 16;
         self.config = Some(config);
         self.state = EngineState::Priming;
@@ -153,8 +157,19 @@ impl AudioEngine {
     }
 
     pub fn render(&mut self, output: &mut [StereoFrame]) -> usize {
+        if self.state == EngineState::Recovering
+            && self.fifo.len() * 100 >= self.fifo.capacity() * 40
+        {
+            self.state = EngineState::Running;
+        }
         if self.state != EngineState::Running {
             output.fill(StereoFrame::default());
+            return 0;
+        }
+        if self.fifo.len() * 100 <= self.fifo.capacity() * 16 {
+            output.fill(StereoFrame::default());
+            self.state = EngineState::Recovering;
+            self.underruns = self.underruns.saturating_add(1);
             return 0;
         }
         let (left_gain, right_gain) = self.controls.effective_gains();
@@ -206,5 +221,39 @@ mod tests {
         assert_eq!(engine.render(&mut output), 1);
         assert_eq!(output[0].left.to_pcm16(), 0x4000);
         assert_eq!(output[0].right.to_pcm16(), -0x4000);
+    }
+
+    #[test]
+    fn feedback_is_full_speed_frames_per_millisecond_q16() {
+        assert_eq!(FeedbackQ16::from_rate_hz(48_000).raw(), 48 << 16);
+        assert_eq!(
+            FeedbackQ16::from_rate_hz(44_100).raw(),
+            ((44_100_u64 << 16).div_ceil(1_000)) as u32
+        );
+    }
+
+    #[test]
+    fn stalls_at_low_watermark_and_recovers_at_forty_percent() {
+        let mut engine = AudioEngine::new();
+        engine.start(
+            StreamConfig {
+                rate: SampleRate::Hz48000,
+                format: SampleFormat::Pcm16,
+            },
+            48_000,
+        );
+        let frame = [0_u8; 4];
+        for _ in 0..384 {
+            engine.push_usb_packet(&frame).unwrap();
+        }
+        let mut output = [StereoFrame::default(); 269];
+        assert_eq!(engine.render(&mut output), 269);
+        assert_eq!(engine.render(&mut output[..1]), 0);
+        assert_eq!(engine.state(), EngineState::Recovering);
+        for _ in 0..288 {
+            engine.push_usb_packet(&frame).unwrap();
+        }
+        assert_eq!(engine.render(&mut output[..1]), 1);
+        assert_eq!(engine.state(), EngineState::Running);
     }
 }

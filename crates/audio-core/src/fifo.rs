@@ -37,6 +37,10 @@ impl<const N: usize> AudioFifo<N> {
         self.len
     }
 
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     pub const fn free(&self) -> usize {
         self.capacity - self.len
     }
