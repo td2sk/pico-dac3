@@ -17,7 +17,6 @@ use defmt::info;
 use defmt_rtt as _;
 use embedded_hal::digital::OutputPin;
 use hal::{
-    Clock,
     dma::{DMAExt, double_buffer},
     pio::{Buffers, PIOBuilder, PIOExt, PinDir, ShiftDirection},
 };
@@ -136,7 +135,9 @@ fn main() -> ! {
     let buffer_a = DMA_BUFFER_A.init([0; i2s::DMA_WORDS]);
     let buffer_b = DMA_BUFFER_B.init([0; i2s::DMA_WORDS]);
     let mut i2s_resources = Some((pio, sm0, dma.ch0, dma.ch1, buffer_a, buffer_b));
-    let system_clock_hz = clocks.system_clock.freq().to_Hz();
+    // `clocks.rs` intentionally bypasses rp-hal's VCO range check to reproduce
+    // pico-dac2, so the HAL's typed bootstrap token does not carry this rate.
+    let system_clock_hz = clocks::SYSTEM_CLOCK_HZ;
 
     #[cfg(rp2040)]
     let usb_bus = hal::usb::UsbBus::new(

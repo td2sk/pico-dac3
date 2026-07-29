@@ -8,10 +8,34 @@ use hal::{
 pub const XOSC_HZ: u32 = 12_000_000;
 pub const SYSTEM_CLOCK_HZ: u32 = 92_160_000;
 
-/// Reproduce pico-dac2's 92.16 MHz system clock without exceeding the PLL VCO
-/// range enforced by rp-hal. The C firmware generates 92.16 MHz directly from
-/// a 2304 MHz VCO; here a 1152 MHz VCO produces 115.2 MHz, followed by the
-/// clock block's exact 1.25 divider.
+/// Reprogram PLL_SYS exactly as pico-dac2's
+/// `set_sys_clock_pll(12 * MHz * 192, 5, 5)`.
+///
+/// rp-hal deliberately rejects a 2304 MHz VCO, so only this explicitly
+/// requested out-of-range configuration crosses an unsafe register boundary.
+unsafe fn configure_legacy_pll_sys() {
+    // SAFETY: PLL_SYS is owned by `init`; CLK_SYS is still running from its
+    // reset source while this function powers down and reconfigures PLL_SYS.
+    let pll = unsafe { &*hal::pac::PLL_SYS::ptr() };
+
+    pll.pwr().reset();
+    pll.fbdiv_int().reset();
+    pll.cs().write(|w| unsafe { w.refdiv().bits(1) });
+    pll.fbdiv_int()
+        .write(|w| unsafe { w.fbdiv_int().bits(192) });
+    pll.pwr().modify(|_, w| {
+        w.pd().clear_bit();
+        w.vcopd().clear_bit()
+    });
+    while pll.cs().read().lock().bit_is_clear() {}
+    pll.prim().write(|w| unsafe {
+        w.postdiv1().bits(5);
+        w.postdiv2().bits(5)
+    });
+    pll.pwr().modify(|_, w| w.postdivpd().clear_bit());
+}
+
+/// Reproduce pico-dac2's exact 2304 MHz / 5 / 5 PLL_SYS configuration.
 pub fn init(
     xosc_dev: hal::pac::XOSC,
     clocks_dev: hal::pac::CLOCKS,
@@ -29,6 +53,8 @@ pub fn init(
     watchdog.enable_tick_generation((XOSC_HZ / 1_000_000) as u16);
 
     let mut clocks = ClocksManager::new(clocks_dev);
+    // Create a typed PLL source through HAL first. Its configuration is only a
+    // bootstrap accepted by HAL; it is replaced below before CLK_SYS selects it.
     let pll_sys = setup_pll_blocking(
         pll_sys_dev,
         xosc.operating_frequency(),
@@ -51,13 +77,18 @@ pub fn init(
     )
     .map_err(InitError::PllError)?;
 
+    // SAFETY: CLK_SYS has not selected PLL_SYS yet.
+    unsafe { configure_legacy_pll_sys() };
+
     clocks
         .reference_clock
         .configure_clock(&xosc, xosc.get_freq())
         .map_err(InitError::ClockError)?;
     clocks
         .system_clock
-        .configure_clock(&pll_sys, SYSTEM_CLOCK_HZ.Hz())
+        // Request the bootstrap token's full rate so HAL programs a divider of
+        // one. The physical PLL was replaced above and outputs 92.16 MHz.
+        .configure_clock(&pll_sys, pll_sys.get_freq())
         .map_err(InitError::ClockError)?;
     clocks
         .usb_clock
