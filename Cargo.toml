@@ -26,6 +26,8 @@ regex = "1.11.0"
 audio-core.workspace = true
 uac2-speaker.workspace = true
 usb-device.workspace = true
+static_cell = "2"
+portable-atomic = { version = "1", features = ["critical-section"] }
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 embedded-hal = "1.0.0"

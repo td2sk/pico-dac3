@@ -28,22 +28,16 @@ fn main() {
             String::new()
         });
 
-    // The file `memory.x` is loaded by cortex-m-rt's `link.x` script, which
-    // is what we specify in `.cargo/config.toml` for Arm builds
-    let target;
-    if contents == "rp2040" {
-        target = "thumbv6m-none-eabi";
+    // TARGET is authoritative when callers use `cargo build --target ...`.
+    // `.pico-rs` still controls the VS Code extension's default target below.
+    let target = std::env::var("TARGET").expect("Cargo did not set TARGET");
+    if target == "thumbv6m-none-eabi" {
         let memory_x = include_bytes!("rp2040.x");
         let mut f = File::create(out.join("memory.x")).unwrap();
         f.write_all(memory_x).unwrap();
         println!("cargo::rustc-cfg=rp2040");
         println!("cargo:rerun-if-changed=rp2040.x");
     } else {
-        if contents.contains("riscv") {
-            target = "riscv32imac-unknown-none-elf";
-        } else {
-            target = "thumbv8m.main-none-eabihf";
-        }
         let memory_x = include_bytes!("rp2350.x");
         let mut f = File::create(out.join("memory.x")).unwrap();
         f.write_all(memory_x).unwrap();
@@ -53,7 +47,14 @@ fn main() {
 
     let re = Regex::new(r"target = .*").unwrap();
     let config_toml = include_str!(".cargo/config.toml");
-    let result = re.replace(config_toml, format!("target = \"{}\"", target));
+    let configured_target = if contents == "rp2040" {
+        "thumbv6m-none-eabi"
+    } else if contents.contains("riscv") {
+        "riscv32imac-unknown-none-elf"
+    } else {
+        "thumbv8m.main-none-eabihf"
+    };
+    let result = re.replace(config_toml, format!("target = \"{}\"", configured_target));
     let mut f = File::create(".cargo/config.toml").unwrap();
     f.write_all(result.as_bytes()).unwrap();
 

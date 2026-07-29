@@ -4,23 +4,24 @@
 //! Copyright (c) 2021 rp-rs organization
 //! Copyright (c) 2025 Raspberry Pi Ltd.
 //!
-//! # GPIO 'Blinky' Example
-//!
-//! This application demonstrates how to control a GPIO pin on the rp2040 and rp235x.
-//!
-//! It may need to be adapted to your particular board layout and/or pin assignment.
+//! pico-dac3 USB Audio Class 2.0 firmware.
 
 #![no_std]
 #![no_main]
 
-use defmt::*;
+use audio_core::{AudioEngine, StreamConfig};
+use defmt::info;
 use defmt_rtt as _;
-use embedded_hal::delay::DelayNs;
-use embedded_hal::digital::OutputPin;
 #[cfg(target_arch = "riscv32")]
 use panic_halt as _;
 #[cfg(target_arch = "arm")]
 use panic_probe as _;
+use static_cell::StaticCell;
+use uac2_speaker::{ControlChange, Uac2Event, Uac2Speaker};
+use usb_device::{
+    bus::UsbBusAllocator,
+    device::{UsbDeviceBuilder, UsbVidPid},
+};
 
 // Alias for our HAL crate
 use hal::entry;
@@ -50,27 +51,17 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 #[cfg(rp2350)]
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
-/// External high-speed crystal on the Raspberry Pi Pico 2 board is 12 MHz.
-/// Adjust if your board has a different frequency
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
+const VENDOR_ID: u16 = 0xcafe;
+const PRODUCT_ID: u16 = 0xbabe;
 
-/// Entry point to our bare-metal application.
-///
-/// The `#[hal::entry]` macro ensures the Cortex-M start-up code calls this function
-/// as soon as all global variables and the spinlock are initialised.
-///
-/// The function configures the rp2040 and rp235x peripherals, then toggles a GPIO pin in
-/// an infinite loop. If there is an LED connected to that pin, it will blink.
+static USB_ALLOCATOR: StaticCell<UsbBusAllocator<hal::usb::UsbBus>> = StaticCell::new();
+
 #[entry]
 fn main() -> ! {
-    info!("Program start");
-    // Grab our singleton objects
+    info!("pico-dac3 start");
     let mut pac = hal::pac::Peripherals::take().unwrap();
-
-    // Set up the watchdog driver - needed by the clock setup code
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
-
-    // Configure the clocks
     let clocks = hal::clocks::init_clocks_and_plls(
         XTAL_FREQ_HZ,
         pac.XOSC,
@@ -82,32 +73,67 @@ fn main() -> ! {
     )
     .unwrap();
 
-    #[cfg(rp2040)]
-    let mut timer = hal::Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
-
-    #[cfg(rp2350)]
-    let mut timer = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
-
-    // The single-cycle I/O block controls our GPIO pins
+    // GPIO must be released from reset before USB is enabled (also required by
+    // the RP2040-E5 workaround when that HAL feature is selected).
     let sio = hal::Sio::new(pac.SIO);
-
-    // Set the pins to their default state
-    let pins = hal::gpio::Pins::new(
+    let _pins = hal::gpio::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
 
-    // Configure GPIO25 as an output
-    let mut led_pin = pins.gpio25.into_push_pull_output();
+    #[cfg(rp2040)]
+    let usb_bus = hal::usb::UsbBus::new(
+        pac.USBCTRL_REGS,
+        pac.USBCTRL_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    );
+    #[cfg(rp2350)]
+    let usb_bus = hal::usb::UsbBus::new(
+        pac.USB,
+        pac.USB_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    );
+
+    let allocator = USB_ALLOCATOR.init(UsbBusAllocator::new(usb_bus));
+    let mut uac2 = Uac2Speaker::new(allocator);
+    let mut usb = UsbDeviceBuilder::new(allocator, UsbVidPid(VENDOR_ID, PRODUCT_ID))
+        .composite_with_iads()
+        .max_packet_size_0(64)
+        .unwrap()
+        .max_power(100)
+        .unwrap()
+        .build();
+    let mut audio = AudioEngine::new();
+
     loop {
-        info!("on!");
-        led_pin.set_high().unwrap();
-        timer.delay_ms(200);
-        info!("off!");
-        led_pin.set_low().unwrap();
-        timer.delay_ms(200);
+        usb.poll(&mut [&mut uac2]);
+
+        while let Some(event) = uac2.next_event() {
+            match event {
+                Uac2Event::StreamStarted { rate, format } => {
+                    // The I2S driver replaces this nominal rate with the exact
+                    // PIO divider result when the stream is configured.
+                    audio.start(StreamConfig { rate, format }, rate.hz());
+                }
+                Uac2Event::StreamStopped => audio.stop(),
+                Uac2Event::ControlChanged(change) => match change {
+                    ControlChange::SampleRate(_) => audio.stop(),
+                    ControlChange::Mute { channel, value } => audio.set_mute(channel, value),
+                    ControlChange::Volume { channel, value } => audio.set_volume(channel, value),
+                },
+            }
+        }
+
+        if let Some(packet) = uac2.take_packet() {
+            let _ = audio.push_usb_packet(packet);
+        }
+        uac2.set_feedback(audio.feedback());
     }
 }
 
@@ -117,7 +143,7 @@ fn main() -> ! {
 pub static PICOTOOL_ENTRIES: [hal::binary_info::EntryAddr; 5] = [
     hal::binary_info::rp_cargo_bin_name!(),
     hal::binary_info::rp_cargo_version!(),
-    hal::binary_info::rp_program_description!(c"Blinky Example"),
+    hal::binary_info::rp_program_description!(c"pico-dac3 UAC2 USB DAC"),
     hal::binary_info::rp_cargo_homepage_url!(),
     hal::binary_info::rp_program_build_attribute!(),
 ];
