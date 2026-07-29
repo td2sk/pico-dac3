@@ -5,10 +5,27 @@ name = "pico-dac3"
 version = "0.1.0"
 license = "MIT or Apache-2.0"
 
+[workspace]
+resolver = "2"
+members = ["crates/audio-core", "crates/uac2-speaker"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+audio-core = { path = "crates/audio-core" }
+uac2-speaker = { path = "crates/uac2-speaker" }
+usb-device = "0.3.2"
+
 [build-dependencies]
 regex = "1.11.0"
 
 [dependencies]
+audio-core.workspace = true
+uac2-speaker.workspace = true
+usb-device.workspace = true
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 embedded-hal = "1.0.0"
@@ -27,6 +44,11 @@ rp2040-hal = { version = "0.11", features = ["rt", "critical-section-impl"] }
 
 [target.riscv32imac-unknown-none-elf.dependencies]
 rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
 
 [target."thumbv8m.main-none-eabihf".dependencies]
 rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"] }
