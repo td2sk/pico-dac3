@@ -284,3 +284,104 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
         let _ = xfer.reject();
     }
 }
+
+pub struct VendorHid<'a, B: UsbBus> {
+    interface: InterfaceNumber,
+    input: EndpointIn<'a, B>,
+    output: EndpointOut<'a, B>,
+    output_report: [u8; 16],
+    output_ready: bool,
+}
+
+impl<'a, B: UsbBus> VendorHid<'a, B> {
+    pub fn new(alloc: &'a UsbBusAllocator<B>) -> Self {
+        let interface = alloc.interface();
+        let input = alloc
+            .alloc(
+                Some(EndpointAddress::from_parts(2, UsbDirection::In)),
+                EndpointType::Interrupt,
+                16,
+                200,
+            )
+            .expect("HID IN endpoint allocation failed");
+        let output = alloc
+            .alloc(
+                Some(EndpointAddress::from_parts(2, UsbDirection::Out)),
+                EndpointType::Interrupt,
+                16,
+                200,
+            )
+            .expect("HID OUT endpoint allocation failed");
+        Self {
+            interface,
+            input,
+            output,
+            output_report: [0; 16],
+            output_ready: false,
+        }
+    }
+
+    pub fn take_output_report(&mut self) -> Option<[u8; 16]> {
+        if core::mem::take(&mut self.output_ready) {
+            Some(self.output_report)
+        } else {
+            None
+        }
+    }
+
+    pub fn write_input_report(&self, report: &[u8; 16]) -> UsbResult<usize> {
+        self.input.write(report)
+    }
+}
+
+impl<B: UsbBus> UsbClass<B> for VendorHid<'_, B> {
+    fn get_configuration_descriptors(&self, writer: &mut DescriptorWriter) -> UsbResult<()> {
+        writer.interface(self.interface, 0x03, 0x00, 0x00)?;
+        writer.write(
+            0x21,
+            &[
+                0x11,
+                0x01, // HID 1.11
+                0x00, // country
+                0x01, // descriptor count
+                0x22, // report descriptor
+                HID_REPORT_DESCRIPTOR.len() as u8,
+                0x00,
+            ],
+        )?;
+        writer.endpoint(&self.input)?;
+        writer.endpoint(&self.output)
+    }
+
+    fn control_in(&mut self, xfer: ControlIn<B>) {
+        let req = *xfer.request();
+        let (descriptor_type, _) = req.descriptor_type_index();
+        if req.request_type == RequestType::Standard
+            && req.recipient == Recipient::Interface
+            && req.index as u8 == u8::from(self.interface)
+            && req.request == usb_device::control::Request::GET_DESCRIPTOR
+            && descriptor_type == 0x22
+        {
+            let _ = xfer.accept_with_static(HID_REPORT_DESCRIPTOR);
+        }
+    }
+
+    fn control_out(&mut self, xfer: ControlOut<B>) {
+        let req = *xfer.request();
+        if req.request_type == RequestType::Class
+            && req.recipient == Recipient::Interface
+            && req.index as u8 == u8::from(self.interface)
+            && req.request == 0x0a
+        {
+            let _ = xfer.accept();
+        }
+    }
+
+    fn endpoint_out(&mut self, address: EndpointAddress) {
+        if address == self.output.address() {
+            if let Ok(16) = self.output.read(&mut self.output_report) {
+                self.output_ready = true;
+            }
+        }
+    }
+}

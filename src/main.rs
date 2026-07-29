@@ -17,7 +17,7 @@ use panic_halt as _;
 #[cfg(target_arch = "arm")]
 use panic_probe as _;
 use static_cell::StaticCell;
-use uac2_speaker::{ControlChange, Uac2Event, Uac2Speaker};
+use uac2_speaker::{ControlChange, Uac2Event, Uac2Speaker, VendorHid};
 use usb_device::{
     bus::UsbBusAllocator,
     device::{UsbDeviceBuilder, UsbVidPid},
@@ -102,6 +102,7 @@ fn main() -> ! {
 
     let allocator = USB_ALLOCATOR.init(UsbBusAllocator::new(usb_bus));
     let mut uac2 = Uac2Speaker::new(allocator);
+    let mut hid = VendorHid::new(allocator);
     let mut usb = UsbDeviceBuilder::new(allocator, UsbVidPid(VENDOR_ID, PRODUCT_ID))
         .composite_with_iads()
         .max_packet_size_0(64)
@@ -112,7 +113,7 @@ fn main() -> ! {
     let mut audio = AudioEngine::new();
 
     loop {
-        usb.poll(&mut [&mut uac2]);
+        usb.poll(&mut [&mut uac2, &mut hid]);
 
         while let Some(event) = uac2.next_event() {
             match event {
@@ -133,6 +134,7 @@ fn main() -> ! {
         if let Some(packet) = uac2.take_packet() {
             let _ = audio.push_usb_packet(packet);
         }
+        let _ = hid.take_output_report();
         uac2.set_feedback(audio.feedback());
     }
 }
