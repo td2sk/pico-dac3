@@ -288,16 +288,13 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
                     let _ = xfer.accept();
                 }
                 (VOLUME, [lo, hi]) => {
-                    if let Some(value) = Volume::from_db_256(i16::from_le_bytes([*lo, *hi])) {
-                        self.volume[index] = value;
-                        self.event = Some(Uac2Event::ControlChanged(ControlChange::Volume {
-                            channel,
-                            value,
-                        }));
-                        let _ = xfer.accept();
-                    } else {
-                        let _ = xfer.reject();
-                    }
+                    let value = Volume::from_db_256(i16::from_le_bytes([*lo, *hi]));
+                    self.volume[index] = value;
+                    self.event = Some(Uac2Event::ControlChanged(ControlChange::Volume {
+                        channel,
+                        value,
+                    }));
+                    let _ = xfer.accept();
                 }
                 _ => {
                     let _ = xfer.reject();

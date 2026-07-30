@@ -15,20 +15,23 @@ impl Volume {
     pub const MAX: Self = Self(0);
     pub const RESOLUTION: i16 = 256;
 
-    pub const fn from_db_256(value: i16) -> Option<Self> {
-        if value >= Self::MIN.0 && value <= Self::MAX.0 && value % 256 == 0 {
-            Some(Self(value))
+    pub const fn from_db_256(value: i16) -> Self {
+        let clamped = if value < Self::MIN.0 {
+            Self::MIN.0
+        } else if value > Self::MAX.0 {
+            Self::MAX.0
         } else {
-            None
-        }
+            value
+        };
+        Self(clamped & !(Self::RESOLUTION - 1))
     }
 
     pub const fn db_256(self) -> i16 {
         self.0
     }
 
-    pub fn gain(self) -> GainU31 {
-        GainU31::from_raw(DB_GAIN_U31[(-self.0 / 256) as usize])
+    pub const fn gain(self) -> GainU31 {
+        GainU31::from_raw(DB_GAIN_U31[(self.0.unsigned_abs() >> 8) as usize])
     }
 }
 
@@ -71,16 +74,16 @@ impl Controls {
     }
 
     pub fn effective_gains(&self) -> (GainU31, GainU31) {
-        let master = self.volume[0].gain();
-        let left = if self.mute[0] || self.mute[1] {
+        let master = self.volume(Channel::Master).gain();
+        let left = if self.mute(Channel::Master) || self.mute(Channel::Left) {
             GainU31::SILENCE
         } else {
-            master.compose(self.volume[1].gain())
+            master.compose(self.volume(Channel::Left).gain())
         };
-        let right = if self.mute[0] || self.mute[2] {
+        let right = if self.mute(Channel::Master) || self.mute(Channel::Right) {
             GainU31::SILENCE
         } else {
-            master.compose(self.volume[2].gain())
+            master.compose(self.volume(Channel::Right).gain())
         };
         (left, right)
     }
@@ -111,8 +114,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_invalid_volume_and_combines_mute() {
-        assert!(Volume::from_db_256(-97 * 256).is_none());
+    fn safely_quantizes_volume_and_combines_mute() {
+        assert_eq!(Volume::from_db_256(-97 * 256), Volume::MIN);
+        assert_eq!(Volume::from_db_256(256), Volume::MAX);
+        assert_eq!(Volume::from_db_256(-1).db_256(), -256);
+        assert_eq!(Volume::from_db_256(-257).db_256(), -512);
+        assert_eq!(Volume::from_db_256(-256).db_256(), -256);
         let mut controls = Controls::new();
         controls.set_mute(Channel::Master, true);
         assert_eq!(
