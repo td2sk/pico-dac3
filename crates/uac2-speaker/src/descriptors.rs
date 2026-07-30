@@ -1,4 +1,4 @@
-use audio_core::Volume;
+use audio_core::{SampleRate, Volume};
 use usb_device::{
     Result,
     bus::{InterfaceNumber, UsbBus},
@@ -8,25 +8,59 @@ use usb_device::{
 pub const AUDIO_MAX_PACKET_SIZE: u16 = (96 + 1) * 4 * 2;
 const CS_INTERFACE: u8 = 0x24;
 const CS_ENDPOINT: u8 = 0x25;
+const RANGE_HEADER_LEN: usize = 2;
+const SAMPLE_RATE_SUBRANGE_LEN: usize = 12;
 
-pub fn sample_rate_range() -> [u8; 50] {
-    let mut bytes = [0; 50];
-    bytes[..2].copy_from_slice(&4_u16.to_le_bytes());
-    for (index, rate) in [44_100_u32, 48_000, 88_200, 96_000].into_iter().enumerate() {
-        let start = 2 + index * 12;
-        bytes[start..start + 4].copy_from_slice(&rate.to_le_bytes());
-        bytes[start + 4..start + 8].copy_from_slice(&rate.to_le_bytes());
+pub const SAMPLE_RATE_RANGE_LEN: usize =
+    RANGE_HEADER_LEN + SampleRate::ALL.len() * SAMPLE_RATE_SUBRANGE_LEN;
+
+pub const fn sample_rate_range() -> [u8; SAMPLE_RATE_RANGE_LEN] {
+    let mut bytes = [0; SAMPLE_RATE_RANGE_LEN];
+
+    let subrange_count = (SampleRate::ALL.len() as u16).to_le_bytes();
+    bytes[0] = subrange_count[0];
+    bytes[1] = subrange_count[1];
+
+    let mut index = 0;
+    while index < SampleRate::ALL.len() {
+        let rate = SampleRate::ALL[index].hz().to_le_bytes();
+        let start = RANGE_HEADER_LEN + index * SAMPLE_RATE_SUBRANGE_LEN;
+
+        // dMIN
+        bytes[start] = rate[0];
+        bytes[start + 1] = rate[1];
+        bytes[start + 2] = rate[2];
+        bytes[start + 3] = rate[3];
+
+        // dMAX
+        bytes[start + 4] = rate[0];
+        bytes[start + 5] = rate[1];
+        bytes[start + 6] = rate[2];
+        bytes[start + 7] = rate[3];
+
+        // dRES remains zero for a discrete sample rate.
+        index += 1;
     }
+
     bytes
 }
 
-pub fn volume_range() -> [u8; 8] {
-    let mut bytes = [0; 8];
-    bytes[..2].copy_from_slice(&1_u16.to_le_bytes());
-    bytes[2..4].copy_from_slice(&Volume::MIN.db_256().to_le_bytes());
-    bytes[4..6].copy_from_slice(&Volume::MAX.db_256().to_le_bytes());
-    bytes[6..8].copy_from_slice(&Volume::RESOLUTION.to_le_bytes());
-    bytes
+pub const fn volume_range() -> [u8; 8] {
+    let subrange_count = 1_u16.to_le_bytes();
+    let min = Volume::MIN.db_256().to_le_bytes();
+    let max = Volume::MAX.db_256().to_le_bytes();
+    let resolution = Volume::RESOLUTION.to_le_bytes();
+
+    [
+        subrange_count[0],
+        subrange_count[1],
+        min[0],
+        min[1],
+        max[0],
+        max[1],
+        resolution[0],
+        resolution[1],
+    ]
 }
 
 pub fn write_uac2<B: UsbBus>(
