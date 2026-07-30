@@ -133,30 +133,31 @@ impl AudioEngine {
             self.state = EngineState::Recovering;
             return Err(PacketError::Overrun);
         }
-        for bytes in packet.chunks_exact(stride) {
-            let frame = match config.format {
-                SampleFormat::Pcm16 => StereoFrame {
-                    left: SampleQ31::from_pcm16(i16::from_le_bytes([bytes[0], bytes[1]])),
-                    right: SampleQ31::from_pcm16(i16::from_le_bytes([bytes[2], bytes[3]])),
-                },
-                SampleFormat::Pcm24In32 => StereoFrame {
-                    left: SampleQ31::from_left_aligned_pcm24(i32::from_le_bytes(
-                        bytes[0..4].try_into().unwrap(),
-                    )),
-                    right: SampleQ31::from_left_aligned_pcm24(i32::from_le_bytes(
-                        bytes[4..8].try_into().unwrap(),
-                    )),
-                },
-                SampleFormat::Pcm32 => StereoFrame {
-                    left: SampleQ31::from_pcm32(i32::from_le_bytes(
-                        bytes[0..4].try_into().unwrap(),
-                    )),
-                    right: SampleQ31::from_pcm32(i32::from_le_bytes(
-                        bytes[4..8].try_into().unwrap(),
-                    )),
-                },
-            };
-            let _ = self.fifo.push(frame);
+        match config.format {
+            SampleFormat::Pcm16 => {
+                for bytes in packet.chunks_exact(4) {
+                    let frame = StereoFrame {
+                        left: SampleQ31::from_pcm16(i16::from_le_bytes([bytes[0], bytes[1]])),
+                        right: SampleQ31::from_pcm16(i16::from_le_bytes([bytes[2], bytes[3]])),
+                    };
+                    let _ = self.fifo.push(frame);
+                }
+            }
+            SampleFormat::Pcm24In32 | SampleFormat::Pcm32 => {
+                for bytes in packet.chunks_exact(8) {
+                    let frame = StereoFrame {
+                        // Both formats use a left-aligned signed sample in a
+                        // 32-bit little-endian subslot, which is already Q1.31.
+                        left: SampleQ31::from_pcm32(i32::from_le_bytes([
+                            bytes[0], bytes[1], bytes[2], bytes[3],
+                        ])),
+                        right: SampleQ31::from_pcm32(i32::from_le_bytes([
+                            bytes[4], bytes[5], bytes[6], bytes[7],
+                        ])),
+                    };
+                    let _ = self.fifo.push(frame);
+                }
+            }
         }
         if matches!(self.state, EngineState::Priming | EngineState::Recovering)
             && self.fifo.len() >= self.target_frames
@@ -231,6 +232,28 @@ mod tests {
         assert_eq!(engine.render(&mut output), 1);
         assert_eq!(output[0].left.to_pcm16(), 0x4000);
         assert_eq!(output[0].right.to_pcm16(), -0x4000);
+    }
+
+    #[test]
+    fn decodes_pcm24_and_pcm32_subslots_identically() {
+        for format in [SampleFormat::Pcm24In32, SampleFormat::Pcm32] {
+            let mut engine = AudioEngine::new();
+            engine.start(
+                StreamConfig {
+                    rate: SampleRate::Hz48000,
+                    format,
+                },
+                48_000,
+            );
+            let frame = [0x00, 0x56, 0x34, 0x12, 0x00, 0xaa, 0xcb, 0xed];
+            let packet = frame.repeat(384);
+            assert_eq!(engine.push_usb_packet(&packet), Ok(384));
+
+            let mut output = [StereoFrame::default(); 1];
+            assert_eq!(engine.render(&mut output), 1);
+            assert_eq!(output[0].left.raw(), 0x1234_5600);
+            assert_eq!(output[0].right.raw(), 0xedcb_aa00_u32 as i32);
+        }
     }
 
     #[test]
