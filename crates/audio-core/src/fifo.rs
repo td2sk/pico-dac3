@@ -54,7 +54,10 @@ impl<const N: usize> AudioFifo<N> {
             return Err(frame);
         }
         self.frames[self.write] = frame;
-        self.write = (self.write + 1) % self.capacity.max(1);
+        self.write += 1;
+        if self.write == self.capacity {
+            self.write = 0;
+        }
         self.len += 1;
         Ok(())
     }
@@ -64,7 +67,10 @@ impl<const N: usize> AudioFifo<N> {
             return None;
         }
         let frame = self.frames[self.read];
-        self.read = (self.read + 1) % self.capacity.max(1);
+        self.read += 1;
+        if self.read == self.capacity {
+            self.read = 0;
+        }
         self.len -= 1;
         Some(frame)
     }
