@@ -104,7 +104,8 @@ impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
         if self.packet_len == 0 {
             return None;
         }
-        let len = core::mem::take(&mut self.packet_len);
+        let len = self.packet_len;
+        self.packet_len = 0;
         Some(&self.packet[..len])
     }
 
