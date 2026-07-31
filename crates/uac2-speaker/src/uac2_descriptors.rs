@@ -193,25 +193,6 @@ pub fn write_uac2<B: UsbBus>(
     Ok(())
 }
 
-pub const HID_REPORT_DESCRIPTOR: &[u8] = &[
-    0x06, 0x00, 0xff, // Usage Page: Vendor Defined 0xff00
-    0x09, 0x01, // Usage: 1
-    0xa1, 0x01, // Collection: Application
-    0x09, 0x02, //   Usage: 2 (input)
-    0x15, 0x00, //   Logical Minimum: 0
-    0x26, 0xff, 0x00, //   Logical Maximum: 255
-    0x75, 0x08, //   Report Size: 8 bits
-    0x95, 0x10, //   Report Count: 16
-    0x81, 0x02, //   Input: Data, Variable, Absolute
-    0x09, 0x03, //   Usage: 3 (output)
-    0x15, 0x00, //   Logical Minimum: 0
-    0x26, 0xff, 0x00, //   Logical Maximum: 255
-    0x75, 0x08, //   Report Size: 8 bits
-    0x95, 0x10, //   Report Count: 16
-    0x91, 0x02, //   Output: Data, Variable, Absolute
-    0xc0, // End Collection
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,17 +204,5 @@ mod tests {
         assert_eq!(&rates[2..6], &44_100_u32.to_le_bytes());
         assert_eq!(&rates[38..42], &96_000_u32.to_le_bytes());
         assert_eq!(volume_range(), [1, 0, 0, 160, 0, 0, 0, 1]);
-    }
-
-    #[test]
-    fn hid_is_vendor_defined_16_byte_in_out() {
-        assert_eq!(HID_REPORT_DESCRIPTOR.len(), 34);
-        assert_eq!(
-            HID_REPORT_DESCRIPTOR
-                .windows(2)
-                .filter(|pair| *pair == [0x95, 0x10])
-                .count(),
-            2
-        );
     }
 }
