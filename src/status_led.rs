@@ -27,7 +27,7 @@ impl<P: OutputPin> StatusLed<P> {
             LedState::Blink { toggle_interval_us }
                 if now_us.wrapping_sub(self.last_toggle_us) >= toggle_interval_us =>
             {
-                self.last_toggle_us = now_us;
+                self.last_toggle_us = self.last_toggle_us.wrapping_add(toggle_interval_us);
                 self.set(!self.is_on);
             }
             LedState::Blink { .. } => {}
