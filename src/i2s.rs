@@ -1,6 +1,7 @@
 use audio_core::{AudioEngine, SampleFormat, StereoFrame};
 
-pub const DMA_WORDS: usize = 96 * 2;
+pub const DMA_FRAMES: usize = 96;
+pub const DMA_WORDS: usize = DMA_FRAMES * 2;
 
 pub fn program(format: SampleFormat) -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
     match format {
@@ -29,7 +30,7 @@ pub fn fill_dma_buffer(
     format: SampleFormat,
     buffer: &mut [u32; DMA_WORDS],
 ) {
-    let mut frames = [StereoFrame::default(); 96];
+    let mut frames = [StereoFrame::default(); DMA_FRAMES];
     audio.render(&mut frames);
     for (words, frame) in buffer.chunks_exact_mut(2).zip(frames) {
         words[0] = frame.left.to_i2s_word(format);
