@@ -9,11 +9,11 @@
 
 mod clocks;
 mod i2s;
+mod status_led;
 
 use audio_core::{AudioEngine, EngineState, StreamConfig};
 use defmt::info;
 use defmt_rtt as _;
-use embedded_hal::digital::OutputPin;
 use hal::{
     dma::{DMAExt, double_buffer},
     pio::{Buffers, PIOBuilder, PIOExt, PinDir, ShiftDirection},
@@ -23,6 +23,7 @@ use panic_halt as _;
 #[cfg(target_arch = "arm")]
 use panic_probe as _;
 use static_cell::StaticCell;
+use status_led::{LedState, StatusLed};
 use uac2_speaker::{ControlChange, Uac2Event, Uac2Speaker, VendorHid};
 use usb_device::{
     bus::UsbBusAllocator,
@@ -64,31 +65,18 @@ static USB_ALLOCATOR: StaticCell<UsbBusAllocator<hal::usb::UsbBus>> = StaticCell
 static DMA_BUFFER_A: StaticCell<[u32; i2s::DMA_WORDS]> = StaticCell::new();
 static DMA_BUFFER_B: StaticCell<[u32; i2s::DMA_WORDS]> = StaticCell::new();
 
-fn service_status_led<P: OutputPin>(
-    pin: &mut P,
-    now_us: u32,
-    last_toggle_us: &mut u32,
-    state: &mut bool,
-    audio_state: EngineState,
-) {
-    let period_us = match audio_state {
-        EngineState::Disabled => 1_000_000,
-        EngineState::Priming => 500_000,
-        EngineState::Running => {
-            *state = true;
-            let _ = pin.set_high();
-            return;
-        }
-        EngineState::Recovering => 250_000,
-    };
-    if now_us.wrapping_sub(*last_toggle_us) >= period_us {
-        *last_toggle_us = now_us;
-        *state = !*state;
-        if *state {
-            let _ = pin.set_high();
-        } else {
-            let _ = pin.set_low();
-        }
+const fn status_led_state(audio_state: EngineState) -> LedState {
+    match audio_state {
+        EngineState::Disabled => LedState::Blink {
+            toggle_interval_us: 1_000_000,
+        },
+        EngineState::Priming => LedState::Blink {
+            toggle_interval_us: 500_000,
+        },
+        EngineState::Running => LedState::On,
+        EngineState::Recovering => LedState::Blink {
+            toggle_interval_us: 250_000,
+        },
     }
 }
 
@@ -119,14 +107,13 @@ fn main() -> ! {
     let _i2s_bclk: hal::gpio::Pin<_, hal::gpio::FunctionPio0, _> = pins.gpio20.into_function();
     let _i2s_lrclk: hal::gpio::Pin<_, hal::gpio::FunctionPio0, _> = pins.gpio21.into_function();
     let _i2s_data: hal::gpio::Pin<_, hal::gpio::FunctionPio0, _> = pins.gpio22.into_function();
-    let mut status_led = pins.gpio25.into_push_pull_output();
+    let status_led_pin = pins.gpio25.into_push_pull_output();
 
     #[cfg(rp2040)]
     let timer = hal::Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     #[cfg(rp2350)]
     let timer = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
-    let mut led_last_toggle_us = timer.get_counter_low();
-    let mut led_state = false;
+    let mut status_led = StatusLed::new(status_led_pin, timer.get_counter_low());
 
     let (pio, sm0, _sm1, _sm2, _sm3) = pac.PIO0.split(&mut pac.RESETS);
     let dma = pac.DMA.split(&mut pac.RESETS);
@@ -203,13 +190,7 @@ fn main() -> ! {
             if uac2.feedback_requested() {
                 uac2.set_feedback(audio.feedback());
             }
-            service_status_led(
-                &mut status_led,
-                timer.get_counter_low(),
-                &mut led_last_toggle_us,
-                &mut led_state,
-                audio.state(),
-            );
+            status_led.update(timer.get_counter_low(), status_led_state(audio.state()));
         }
 
         let config = requested_stream.take().unwrap();
@@ -277,13 +258,7 @@ fn main() -> ! {
             if uac2.feedback_requested() {
                 uac2.set_feedback(audio.feedback());
             }
-            service_status_led(
-                &mut status_led,
-                timer.get_counter_low(),
-                &mut led_last_toggle_us,
-                &mut led_state,
-                audio.state(),
-            );
+            status_led.update(timer.get_counter_low(), status_led_state(audio.state()));
 
             if stop {
                 break;
