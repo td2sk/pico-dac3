@@ -30,6 +30,7 @@ audio-core.workspace = true
 uac2-speaker.workspace = true
 usb-device.workspace = true
 static_cell = "2"
+embedded-dma = "0.2"
 portable-atomic = { version = "1", features = ["critical-section"] }
 pio-proc = "0.2"
 pio = "0.2"

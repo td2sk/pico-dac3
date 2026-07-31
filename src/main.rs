@@ -10,25 +10,21 @@
 mod clocks;
 mod i2s;
 mod status_led;
+mod stream;
+mod usb;
 
-use audio_core::{AudioEngine, EngineState, StreamConfig};
+use audio_core::{AudioEngine, EngineState};
 use defmt::info;
 use defmt_rtt as _;
-use hal::{
-    dma::{DMAExt, double_buffer},
-    pio::{Buffers, PIOBuilder, PIOExt, PinDir, ShiftDirection},
-};
+use hal::{dma::DMAExt, pio::PIOExt};
 #[cfg(target_arch = "riscv32")]
 use panic_halt as _;
 #[cfg(target_arch = "arm")]
 use panic_probe as _;
 use static_cell::StaticCell;
 use status_led::{LedState, StatusLed};
-use uac2_speaker::{ControlChange, Uac2Event, Uac2Speaker, VendorHid};
-use usb_device::{
-    bus::UsbBusAllocator,
-    device::{UsbDeviceBuilder, UsbRev, UsbVidPid},
-};
+use stream::StreamController;
+use usb::UsbRuntime;
 
 // Alias for our HAL crate
 use hal::entry;
@@ -58,12 +54,8 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 #[cfg(rp2350)]
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
 
-const VENDOR_ID: u16 = 0xcafe;
-const PRODUCT_ID: u16 = 0xbabe;
-
-static USB_ALLOCATOR: StaticCell<UsbBusAllocator<hal::usb::UsbBus>> = StaticCell::new();
-static DMA_BUFFER_A: StaticCell<[u32; i2s::DMA_WORDS]> = StaticCell::new();
-static DMA_BUFFER_B: StaticCell<[u32; i2s::DMA_WORDS]> = StaticCell::new();
+static DMA_BUFFER_A: StaticCell<[u32; i2s::MAX_DMA_WORDS]> = StaticCell::new();
+static DMA_BUFFER_B: StaticCell<[u32; i2s::MAX_DMA_WORDS]> = StaticCell::new();
 
 const fn status_led_state(audio_state: EngineState) -> LedState {
     match audio_state {
@@ -117,12 +109,19 @@ fn main() -> ! {
 
     let (pio, sm0, _sm1, _sm2, _sm3) = pac.PIO0.split(&mut pac.RESETS);
     let dma = pac.DMA.split(&mut pac.RESETS);
-    let buffer_a = DMA_BUFFER_A.init([0; i2s::DMA_WORDS]);
-    let buffer_b = DMA_BUFFER_B.init([0; i2s::DMA_WORDS]);
-    let mut i2s_resources = Some((pio, sm0, dma.ch0, dma.ch1, buffer_a, buffer_b));
+    let buffer_a = DMA_BUFFER_A.init([0; i2s::MAX_DMA_WORDS]);
+    let buffer_b = DMA_BUFFER_B.init([0; i2s::MAX_DMA_WORDS]);
     // `clocks.rs` intentionally bypasses rp-hal's VCO range check to reproduce
     // pico-dac2, so the HAL's typed bootstrap token does not carry this rate.
     let system_clock_hz = clocks::SYSTEM_CLOCK_HZ;
+    let mut i2s = i2s::I2s::new(
+        pio,
+        sm0,
+        (dma.ch0, dma.ch1),
+        buffer_a,
+        buffer_b,
+        system_clock_hz,
+    );
 
     #[cfg(rp2040)]
     let usb_bus = hal::usb::UsbBus::new(
@@ -141,146 +140,28 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    let allocator = USB_ALLOCATOR.init(UsbBusAllocator::new(usb_bus));
-    let mut uac2 = Uac2Speaker::new(allocator);
-    let mut hid = VendorHid::new(allocator);
-    let mut usb = UsbDeviceBuilder::new(allocator, UsbVidPid(VENDOR_ID, PRODUCT_ID))
-        .composite_with_iads()
-        .max_packet_size_0(64)
-        .unwrap()
-        .usb_rev(UsbRev::Usb200)
-        .device_release(0)
-        .max_power(100)
-        .unwrap()
-        .build();
+    let mut usb = UsbRuntime::new(usb_bus);
     let mut audio = AudioEngine::new();
-    let mut requested_stream: Option<StreamConfig> = None;
+    let mut stream = StreamController::new();
 
     loop {
-        // Remain responsive to USB while accumulating the 50% startup level.
-        while requested_stream.is_none() || audio.state() != EngineState::Running {
-            usb.poll(&mut [&mut uac2, &mut hid]);
-            while let Some(event) = uac2.next_event() {
-                match event {
-                    Uac2Event::StreamStarted { rate, format } => {
-                        let config = StreamConfig { rate, format };
-                        audio.start(config, rate.hz());
-                        requested_stream = Some(config);
-                    }
-                    Uac2Event::StreamStopped => {
-                        audio.stop();
-                        requested_stream = None;
-                    }
-                    Uac2Event::ControlChanged(change) => match change {
-                        ControlChange::SampleRate(_) => {
-                            audio.stop();
-                            requested_stream = None;
-                        }
-                        ControlChange::Mute { channel, value } => audio.set_mute(channel, value),
-                        ControlChange::Volume { channel, value } => {
-                            audio.set_volume(channel, value)
-                        }
-                    },
-                }
-            }
-            if let Some(packet) = uac2.take_packet() {
-                let _ = audio.push_usb_packet(packet);
-            }
-            let _ = hid.take_output_report();
-            if uac2.feedback_requested() {
-                uac2.set_feedback(audio.feedback());
-            }
-            status_led.update(timer.get_counter_low(), status_led_state(audio.state()));
+        usb.poll();
+        while let Some(event) = usb.next_audio_event() {
+            stream.handle_event(event, usb.current_format(), &mut audio);
         }
 
-        let config = requested_stream.take().unwrap();
-        let (mut pio, sm0, ch0, ch1, buffer_a, buffer_b) = i2s_resources.take().unwrap();
-
-        let pio_program = i2s::program(config.format);
-        let cycles_per_frame = i2s::cycles_per_frame(config.format);
-        let divider_256 = ((system_clock_hz as u64 * 256)
-            / (config.rate.hz() as u64 * cycles_per_frame as u64)) as u32;
-        let actual_rate_hz = ((system_clock_hz as u64 * 256)
-            / (divider_256 as u64 * cycles_per_frame as u64)) as u32;
-        audio.set_actual_output_rate(actual_rate_hz);
-        let installed = pio.install(&pio_program).unwrap();
-        let (mut sm, rx, tx) = PIOBuilder::from_installed_program(installed)
-            .out_pins(22, 1)
-            .side_set_pin_base(20)
-            .clock_divisor_fixed_point((divider_256 / 256) as u16, divider_256 as u8)
-            .buffers(Buffers::OnlyTx)
-            .autopull(true)
-            .pull_threshold(32)
-            .out_shift_direction(ShiftDirection::Left)
-            .build(sm0);
-        sm.set_pindirs([
-            (20, PinDir::Output),
-            (21, PinDir::Output),
-            (22, PinDir::Output),
-        ]);
-
-        i2s::fill_dma_buffer(&mut audio, config.format, buffer_a);
-        i2s::fill_dma_buffer(&mut audio, config.format, buffer_b);
-        let transfer = double_buffer::Config::new((ch0, ch1), buffer_a, tx).start();
-        let mut transfer = transfer.read_next(buffer_b);
-        let sm = sm.start();
-        let mut restart_stream = None;
-
-        loop {
-            usb.poll(&mut [&mut uac2, &mut hid]);
-            let mut stop = false;
-            while let Some(event) = uac2.next_event() {
-                match event {
-                    Uac2Event::StreamStarted { rate, format } => {
-                        restart_stream = Some(StreamConfig { rate, format });
-                        stop = true;
-                    }
-                    Uac2Event::StreamStopped => {
-                        audio.stop();
-                        stop = true;
-                    }
-                    Uac2Event::ControlChanged(change) => match change {
-                        ControlChange::SampleRate(_) => {
-                            audio.stop();
-                            stop = true;
-                        }
-                        ControlChange::Mute { channel, value } => audio.set_mute(channel, value),
-                        ControlChange::Volume { channel, value } => {
-                            audio.set_volume(channel, value)
-                        }
-                    },
-                }
-            }
-            if let Some(packet) = uac2.take_packet() {
-                let _ = audio.push_usb_packet(packet);
-            }
-            let _ = hid.take_output_report();
-            if uac2.feedback_requested() {
-                uac2.set_feedback(audio.feedback());
-            }
-            status_led.update(timer.get_counter_low(), status_led_state(audio.state()));
-
-            if stop {
-                break;
-            }
-            if transfer.is_done() {
-                let (free_buffer, next) = transfer.wait();
-                i2s::fill_dma_buffer(&mut audio, config.format, free_buffer);
-                transfer = next.read_next(free_buffer);
-            }
+        if let Some(packet) = usb.take_audio_packet() {
+            let _ = audio.push_usb_packet(packet);
         }
+        let _ = usb.take_hid_output_report();
 
-        // Drain the two already-scheduled blocks before reclaiming DMA/PIO.
-        let (buffer_a, transfer) = transfer.wait();
-        let (ch0, ch1, buffer_b, tx) = transfer.wait();
-        let (sm0, installed) = sm.stop().uninit(rx, tx);
-        pio.uninstall(installed);
-        i2s_resources = Some((pio, sm0, ch0, ch1, buffer_a, buffer_b));
+        stream.reconcile(&mut audio, &mut i2s);
+        i2s.poll(&mut audio);
 
-        if let Some(config) = restart_stream {
-            audio.start(config, config.rate.hz());
-            requested_stream = Some(config);
+        if usb.feedback_requested() {
+            usb.set_feedback(audio.feedback());
         }
+        status_led.update(timer.get_counter_low(), status_led_state(audio.state()));
     }
 }
 

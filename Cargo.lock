@@ -626,6 +626,7 @@ dependencies = [
  "cortex-m-rt",
  "defmt",
  "defmt-rtt",
+ "embedded-dma",
  "embedded-hal 1.0.0",
  "panic-halt",
  "panic-probe",
