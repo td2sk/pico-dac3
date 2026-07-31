@@ -163,21 +163,33 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
     }
 
     fn set_alt_setting(&mut self, interface: InterfaceNumber, alternative: u8) -> bool {
-        if u8::from(interface) != u8::from(self.streaming_interface) || alternative > 3 {
+        if u8::from(interface) != u8::from(self.streaming_interface) {
             return false;
         }
+
+        let format = match alternative {
+            0 => None,
+            1 => Some(SampleFormat::Pcm16),
+            2 => Some(SampleFormat::Pcm24In32),
+            3 => Some(SampleFormat::Pcm32),
+            _ => return false,
+        };
+
         self.alt = alternative;
         self.packet_len = 0;
-        self.event = if alternative == 0 {
-            self.feedback_pending = false;
-            Some(Uac2Event::StreamStopped)
-        } else {
-            self.feedback = FeedbackQ16::from_rate_hz(self.rate.hz());
-            self.feedback_pending = true;
-            Some(Uac2Event::StreamStarted {
-                rate: self.rate,
-                format: self.current_format().unwrap(),
-            })
+        self.event = match format {
+            None => {
+                self.feedback_pending = false;
+                Some(Uac2Event::StreamStopped)
+            }
+            Some(format) => {
+                self.feedback = FeedbackQ16::from_rate_hz(self.rate.hz());
+                self.feedback_pending = true;
+                Some(Uac2Event::StreamStarted {
+                    rate: self.rate,
+                    format,
+                })
+            }
         };
         true
     }
@@ -251,12 +263,14 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
         let selector = (req.value >> 8) as u8;
         let raw_channel = req.value as u8;
 
-        if entity == CLOCK_SOURCE
-            && selector == SAMPLING_FREQUENCY
-            && req.request == CUR
-            && xfer.data().len() == 4
-        {
-            let hz = u32::from_le_bytes(xfer.data().try_into().unwrap());
+        if entity == CLOCK_SOURCE && selector == SAMPLING_FREQUENCY && req.request == CUR {
+            let hz = match xfer.data() {
+                [b0, b1, b2, b3] => u32::from_le_bytes([*b0, *b1, *b2, *b3]),
+                _ => {
+                    let _ = xfer.reject();
+                    return;
+                }
+            };
             if let Some(rate) = SampleRate::from_hz(hz) {
                 self.rate = rate;
                 self.feedback = FeedbackQ16::from_rate_hz(rate.hz());
