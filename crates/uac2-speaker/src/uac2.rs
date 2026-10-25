@@ -50,7 +50,7 @@ pub struct Uac2Speaker<'a, B: UsbBus> {
     packet: [u8; AUDIO_MAX_PACKET_SIZE as usize],
     packet_len: usize,
     feedback: FeedbackQ16,
-    feedback_pending: bool,
+    feedback_update_pending: bool,
 }
 
 impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
@@ -92,7 +92,7 @@ impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
             packet: [0; AUDIO_MAX_PACKET_SIZE as usize],
             packet_len: 0,
             feedback: FeedbackQ16::from_rate_hz(48_000),
-            feedback_pending: false,
+            feedback_update_pending: false,
         }
     }
 
@@ -109,12 +109,16 @@ impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
         Some(&self.packet[..len])
     }
 
+    /// Prepare the value for the next feedback transfer.
     pub fn set_feedback(&mut self, value: FeedbackQ16) {
         self.feedback = value;
+        self.feedback_update_pending = false;
     }
 
+    /// A packet was queued successfully; calculate its successor after
+    /// processing this poll's audio data, once per feedback transfer.
     pub const fn feedback_requested(&self) -> bool {
-        self.feedback_pending
+        self.feedback_update_pending
     }
 
     pub const fn current_format(&self) -> Option<SampleFormat> {
@@ -156,6 +160,7 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
     fn reset(&mut self) {
         self.alt = 0;
         self.packet_len = 0;
+        self.feedback_update_pending = false;
         self.event = Some(Uac2Event::StreamStopped);
     }
 
@@ -178,14 +183,11 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
 
         self.alt = alternative;
         self.packet_len = 0;
+        self.feedback_update_pending = false;
         self.event = match format {
-            None => {
-                self.feedback_pending = false;
-                Some(Uac2Event::StreamStopped)
-            }
+            None => Some(Uac2Event::StreamStopped),
             Some(format) => {
                 self.feedback = FeedbackQ16::from_rate_hz(self.rate.hz());
-                self.feedback_pending = true;
                 Some(Uac2Event::StreamStarted {
                     rate: self.rate,
                     format,
@@ -206,20 +208,16 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
     }
 
     fn poll(&mut self) {
+        // Endpoint backpressure is authoritative. rp-hal can lose an IN
+        // completion when acknowledging USB status, so waiting for that
+        // callback before writing again can permanently stop feedback.
         if self.alt != 0
-            && self.feedback_pending
             && self
                 .feedback_in
                 .write(&self.feedback.to_usb_bytes())
                 .is_ok()
         {
-            self.feedback_pending = false;
-        }
-    }
-
-    fn endpoint_in_complete(&mut self, address: EndpointAddress) {
-        if address == self.feedback_in.address() && self.alt != 0 {
-            self.feedback_pending = true;
+            self.feedback_update_pending = true;
         }
     }
 

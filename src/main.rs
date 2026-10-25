@@ -158,6 +158,8 @@ fn main() -> ! {
         stream.reconcile(&mut audio, &mut i2s);
         i2s.poll(&mut audio);
 
+        // A successful USB write requests the next packet's feedback value,
+        // advancing the occupancy filter once per feedback transfer.
         if usb.feedback_requested() {
             usb.set_feedback(audio.feedback());
         }

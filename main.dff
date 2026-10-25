@@ -1,0 +1,346 @@
+diff --git a/crates/uac2-speaker/src/uac2.rs b/crates/uac2-speaker/src/uac2.rs
+index b607008..c9cd9a0 100644
+--- a/crates/uac2-speaker/src/uac2.rs
++++ b/crates/uac2-speaker/src/uac2.rs
+@@ -50,7 +50,7 @@ pub struct Uac2Speaker<'a, B: UsbBus> {
+     packet: [u8; AUDIO_MAX_PACKET_SIZE as usize],
+     packet_len: usize,
+     feedback: FeedbackQ16,
+-    feedback_pending: bool,
++    feedback_update_pending: bool,
+ }
+ 
+ impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
+@@ -92,7 +92,7 @@ impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
+             packet: [0; AUDIO_MAX_PACKET_SIZE as usize],
+             packet_len: 0,
+             feedback: FeedbackQ16::from_rate_hz(48_000),
+-            feedback_pending: false,
++            feedback_update_pending: false,
+         }
+     }
+ 
+@@ -109,12 +109,16 @@ impl<'a, B: UsbBus> Uac2Speaker<'a, B> {
+         Some(&self.packet[..len])
+     }
+ 
++    /// Prepare the value for the next feedback transfer.
+     pub fn set_feedback(&mut self, value: FeedbackQ16) {
+         self.feedback = value;
++        self.feedback_update_pending = false;
+     }
+ 
++    /// A packet was queued successfully; calculate its successor after
++    /// processing this poll's audio data, once per feedback transfer.
+     pub const fn feedback_requested(&self) -> bool {
+-        self.feedback_pending
++        self.feedback_update_pending
+     }
+ 
+     pub const fn current_format(&self) -> Option<SampleFormat> {
+@@ -156,6 +160,7 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
+     fn reset(&mut self) {
+         self.alt = 0;
+         self.packet_len = 0;
++        self.feedback_update_pending = false;
+         self.event = Some(Uac2Event::StreamStopped);
+     }
+ 
+@@ -178,14 +183,11 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
+ 
+         self.alt = alternative;
+         self.packet_len = 0;
++        self.feedback_update_pending = false;
+         self.event = match format {
+-            None => {
+-                self.feedback_pending = false;
+-                Some(Uac2Event::StreamStopped)
+-            }
++            None => Some(Uac2Event::StreamStopped),
+             Some(format) => {
+                 self.feedback = FeedbackQ16::from_rate_hz(self.rate.hz());
+-                self.feedback_pending = true;
+                 Some(Uac2Event::StreamStarted {
+                     rate: self.rate,
+                     format,
+@@ -206,20 +208,16 @@ impl<B: UsbBus> UsbClass<B> for Uac2Speaker<'_, B> {
+     }
+ 
+     fn poll(&mut self) {
++        // Endpoint backpressure is authoritative. rp-hal can lose an IN
++        // completion when acknowledging USB status, so waiting for that
++        // callback before writing again can permanently stop feedback.
+         if self.alt != 0
+-            && self.feedback_pending
+             && self
+                 .feedback_in
+                 .write(&self.feedback.to_usb_bytes())
+                 .is_ok()
+         {
+-            self.feedback_pending = false;
+-        }
+-    }
+-
+-    fn endpoint_in_complete(&mut self, address: EndpointAddress) {
+-        if address == self.feedback_in.address() && self.alt != 0 {
+-            self.feedback_pending = true;
++            self.feedback_update_pending = true;
+         }
+     }
+ 
+diff --git a/crates/uac2-speaker/tests/feedback.rs b/crates/uac2-speaker/tests/feedback.rs
+new file mode 100644
+index 0000000..c28b137
+--- /dev/null
++++ b/crates/uac2-speaker/tests/feedback.rs
+@@ -0,0 +1,237 @@
++use std::sync::{Arc, Mutex};
++
++use audio_core::{AudioEngine, FeedbackQ16, SampleFormat, SampleRate, StreamConfig};
++use uac2_speaker::Uac2Speaker;
++use usb_device::{
++    Result, UsbDirection, UsbError,
++    bus::{PollResult, UsbBus, UsbBusAllocator},
++    device::{UsbDeviceBuilder, UsbVidPid},
++    endpoint::{EndpointAddress, EndpointType},
++};
++
++const FEEDBACK_COMPLETE: u32 = 1 << 2;
++const AUDIO_OUT: u32 = 1 << 3;
++
++#[derive(Default)]
++struct Registers {
++    status: u32,
++    setup: Option<[u8; 8]>,
++    reset: bool,
++    feedback_available: bool,
++    feedback_writes: Vec<[u8; 4]>,
++    complete_feedback_after_snapshot: bool,
++}
++
++impl Registers {
++    fn set_alt(&mut self, alt: u8) {
++        // SET_INTERFACE for the AudioStreaming interface (interface 1).
++        self.setup = Some([0x01, 0x0b, alt, 0, 1, 0, 0, 0]);
++    }
++
++    fn complete_feedback(&mut self) {
++        assert!(self.feedback_available);
++        self.feedback_available = false;
++        self.status |= FEEDBACK_COMPLETE;
++    }
++}
++
++struct TestBus(Arc<Mutex<Registers>>);
++
++impl UsbBus for TestBus {
++    fn alloc_ep(
++        &mut self,
++        dir: UsbDirection,
++        addr: Option<EndpointAddress>,
++        _: EndpointType,
++        _: u16,
++        _: u8,
++    ) -> Result<EndpointAddress> {
++        Ok(addr.unwrap_or_else(|| EndpointAddress::from_parts(0, dir)))
++    }
++
++    fn enable(&mut self) {}
++
++    fn reset(&self) {
++        let mut r = self.0.lock().unwrap();
++        r.status = 0;
++        r.setup = None;
++        r.feedback_available = false;
++    }
++
++    fn set_device_address(&self, _: u8) {}
++    fn set_stalled(&self, _: EndpointAddress, _: bool) {}
++    fn is_stalled(&self, _: EndpointAddress) -> bool {
++        false
++    }
++    fn suspend(&self) {}
++    fn resume(&self) {}
++
++    fn write(&self, addr: EndpointAddress, bytes: &[u8]) -> Result<usize> {
++        let mut r = self.0.lock().unwrap();
++        if addr.index() == 1 {
++            if r.feedback_available {
++                return Err(UsbError::WouldBlock);
++            }
++            r.feedback_available = true;
++            r.feedback_writes.push(bytes.try_into().unwrap());
++        }
++        Ok(bytes.len())
++    }
++
++    fn read(&self, addr: EndpointAddress, output: &mut [u8]) -> Result<usize> {
++        let mut r = self.0.lock().unwrap();
++        if addr.index() == 0 {
++            let setup = r.setup.take().ok_or(UsbError::WouldBlock)?;
++            output[..setup.len()].copy_from_slice(&setup);
++            Ok(setup.len())
++        } else if r.status & AUDIO_OUT != 0 {
++            r.status &= !AUDIO_OUT;
++            output[..48 * 4].fill(0);
++            Ok(48 * 4)
++        } else {
++            Err(UsbError::WouldBlock)
++        }
++    }
++
++    fn poll(&self) -> PollResult {
++        let mut r = self.0.lock().unwrap();
++        if std::mem::take(&mut r.reset) {
++            return PollResult::Reset;
++        }
++        let snapshot = r.status;
++        let setup = r.setup.is_some();
++        if snapshot == 0 && !setup {
++            return PollResult::None;
++        }
++
++        // rp2040-hal 0.11.0 reads BUFF_STATUS, then acknowledges all IN
++        // bits. An IN completion between those operations is lost even
++        // though the endpoint buffer is now available for another write.
++        if std::mem::take(&mut r.complete_feedback_after_snapshot) {
++            r.complete_feedback();
++        }
++        r.status &= !0x5555_5555;
++
++        PollResult::Data {
++            ep_out: if snapshot & AUDIO_OUT != 0 { 2 } else { 0 },
++            ep_in_complete: if snapshot & FEEDBACK_COMPLETE != 0 {
++                2
++            } else {
++                0
++            },
++            ep_setup: u16::from(setup),
++        }
++    }
++}
++
++#[test]
++fn feedback_updates_once_per_successful_transfer() {
++    let r = Arc::new(Mutex::new(Registers::default()));
++    let alloc = UsbBusAllocator::new(TestBus(r.clone()));
++    let mut speaker = Uac2Speaker::new(&alloc);
++    let mut device = UsbDeviceBuilder::new(&alloc, UsbVidPid(0xcafe, 0xbabe)).build();
++    let mut audio = AudioEngine::new();
++    audio.start(
++        StreamConfig {
++            rate: SampleRate::Hz48000,
++            format: SampleFormat::Pcm16,
++        },
++        48_000,
++    );
++    audio.push_usb_packet(&[0; 480 * 4]).unwrap();
++
++    r.lock().unwrap().set_alt(1);
++    device.poll(&mut [&mut speaker]);
++    let nominal = FeedbackQ16::from_rate_hz(48_000).to_usb_bytes();
++    assert_eq!(r.lock().unwrap().feedback_writes, [nominal]);
++
++    for transfer in 1..=100 {
++        // Follow main's ordering: poll USB, process audio, then prepare the
++        // next feedback value only when requested by a successful write.
++        assert!(speaker.feedback_requested());
++        let feedback = audio.feedback();
++        assert_ne!(feedback.to_usb_bytes(), nominal);
++        speaker.set_feedback(feedback);
++        assert!(!speaker.feedback_requested());
++
++        // OUT events and idle main-loop iterations must not advance the
++        // occupancy filter while the feedback endpoint is still busy.
++        for _ in 0..10 {
++            r.lock().unwrap().status |= AUDIO_OUT;
++            device.poll(&mut [&mut speaker]);
++            speaker.take_packet();
++            assert!(!speaker.feedback_requested());
++            assert_eq!(r.lock().unwrap().feedback_writes.len(), transfer);
++            assert!(!device.poll(&mut [&mut speaker]));
++            assert!(!speaker.feedback_requested());
++        }
++
++        r.lock().unwrap().complete_feedback();
++        device.poll(&mut [&mut speaker]);
++        assert_eq!(
++            r.lock().unwrap().feedback_writes[transfer],
++            feedback.to_usb_bytes()
++        );
++    }
++}
++
++#[test]
++fn feedback_continues_when_completion_notifications_are_lost() {
++    let r = Arc::new(Mutex::new(Registers::default()));
++    let alloc = UsbBusAllocator::new(TestBus(r.clone()));
++    let mut speaker = Uac2Speaker::new(&alloc);
++    let mut device = UsbDeviceBuilder::new(&alloc, UsbVidPid(0xcafe, 0xbabe)).build();
++    r.lock().unwrap().set_alt(1);
++    device.poll(&mut [&mut speaker]);
++
++    for transfer in 1..=1000 {
++        let feedback = FeedbackQ16::from_rate_hz(48_000 + transfer as u32 % 100);
++        speaker.set_feedback(feedback);
++        {
++            let mut r = r.lock().unwrap();
++            r.status |= AUDIO_OUT;
++            r.complete_feedback_after_snapshot = true;
++        }
++        device.poll(&mut [&mut speaker]);
++        speaker.take_packet();
++        let r = r.lock().unwrap();
++        assert_eq!(r.feedback_writes.len(), transfer + 1);
++        assert_eq!(r.feedback_writes[transfer], feedback.to_usb_bytes());
++        assert!(r.feedback_available);
++    }
++}
++
++#[test]
++fn stopping_and_resetting_clear_feedback_updates() {
++    let r = Arc::new(Mutex::new(Registers::default()));
++    let alloc = UsbBusAllocator::new(TestBus(r.clone()));
++    let mut speaker = Uac2Speaker::new(&alloc);
++    let mut device = UsbDeviceBuilder::new(&alloc, UsbVidPid(0xcafe, 0xbabe)).build();
++    r.lock().unwrap().set_alt(1);
++    device.poll(&mut [&mut speaker]);
++    speaker.set_feedback(FeedbackQ16::from_rate_hz(48_100));
++
++    {
++        let mut r = r.lock().unwrap();
++        r.complete_feedback();
++        r.set_alt(0);
++    }
++    device.poll(&mut [&mut speaker]);
++    assert!(!speaker.feedback_requested());
++    assert_eq!(r.lock().unwrap().feedback_writes.len(), 1);
++
++    r.lock().unwrap().set_alt(1);
++    device.poll(&mut [&mut speaker]);
++    assert!(speaker.feedback_requested());
++    assert_eq!(
++        r.lock().unwrap().feedback_writes[1],
++        FeedbackQ16::from_rate_hz(48_000).to_usb_bytes()
++    );
++
++    r.lock().unwrap().reset = true;
++    device.poll(&mut [&mut speaker]);
++    assert!(!speaker.feedback_requested());
++    r.lock().unwrap().status |= AUDIO_OUT;
++    device.poll(&mut [&mut speaker]);
++    assert_eq!(r.lock().unwrap().feedback_writes.len(), 2);
++}
+diff --git a/src/main.rs b/src/main.rs
+index 21de6a3..51b54b4 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -158,6 +158,8 @@ fn main() -> ! {
+         stream.reconcile(&mut audio, &mut i2s);
+         i2s.poll(&mut audio);
+ 
++        // A successful USB write requests the next packet's feedback value,
++        // advancing the occupancy filter once per feedback transfer.
+         if usb.feedback_requested() {
+             usb.set_feedback(audio.feedback());
+         }
