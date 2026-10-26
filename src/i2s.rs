@@ -249,13 +249,13 @@ impl I2s {
 fn program(format: SampleFormat) -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
     match format {
         SampleFormat::Pcm16 => {
-            pio_proc::pio_file!("src/i2s.pio", select_program("i2s_stereo_16bit")).program
+            pio::pio_file!("src/i2s.pio", select_program("i2s_stereo_16bit")).program
         }
         SampleFormat::Pcm24In32 => {
-            pio_proc::pio_file!("src/i2s.pio", select_program("i2s_stereo_24bit")).program
+            pio::pio_file!("src/i2s.pio", select_program("i2s_stereo_24bit")).program
         }
         SampleFormat::Pcm32 => {
-            pio_proc::pio_file!("src/i2s.pio", select_program("i2s_stereo_32bit")).program
+            pio::pio_file!("src/i2s.pio", select_program("i2s_stereo_32bit")).program
         }
     }
 }

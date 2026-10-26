@@ -80,6 +80,9 @@ PROVIDE(MachineExternal = DefaultHandler);
 PROVIDE(DefaultHandler = DefaultInterruptHandler);
 PROVIDE(ExceptionHandler = DefaultExceptionHandler);
 
+/* Default handlers for the device interrupts exposed by rp235x-pac. */
+INCLUDE device.x
+
 /* # Pre-initialization function */
 /* If the user overrides this using the `#[pre_init]` attribute or by creating a `__pre_init` function,
    then the function this points to will be called before the RAM is initialized. */

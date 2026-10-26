@@ -32,8 +32,7 @@ usb-device.workspace = true
 static_cell = "2"
 embedded-dma = "0.2"
 portable-atomic = { version = "1", features = ["critical-section"] }
-pio-proc = "0.2"
-pio = "0.2"
+pio = "0.3"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 embedded-hal = "1.0.0"
@@ -48,10 +47,10 @@ panic-halt = { version = "1.0.0" }
 
 [target.thumbv6m-none-eabi.dependencies]
 rp2040-boot2 = "0.3"
-rp2040-hal = { version = "0.11", features = ["rt", "critical-section-impl"] }
+rp2040-hal = { version = "0.12", features = ["rt", "critical-section-impl"] }
 
 [target.riscv32imac-unknown-none-elf.dependencies]
-rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"] }
+rp235x-hal = { version = "0.4", features = ["rt", "critical-section-impl"] }
 
 [profile.release]
 codegen-units = 1
@@ -59,4 +58,4 @@ lto = true
 opt-level = "s"
 
 [target."thumbv8m.main-none-eabihf".dependencies]
-rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"] }
+rp235x-hal = { version = "0.4", features = ["rt", "critical-section-impl"] }
